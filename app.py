@@ -1,161 +1,146 @@
-# app.py (Corrected & Functional — Fully Working AI Concrete Strength App)
-
 import gradio as gr
 import pandas as pd
 import numpy as np
 import joblib
-import os
-from datetime import datetime
 import matplotlib.pyplot as plt
-import seaborn as sns
+from datetime import datetime
+import os
+from fpdf import FPDF
+import uuid
 
-# ------------------- Initialization ----------------------
-LOG_FILE = "logs/user_logs.xlsx"
-UPLOAD_DIR = "uploads"
-os.makedirs("logs", exist_ok=True)
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Load model and scaler
+model = joblib.load("model.pkl")
+scaler = joblib.load("scaler.pkl")
+log_file = "user_logs.xlsx"
 
-model = joblib.load("concrete_strength_model.pkl")
-scaler = joblib.load("concrete_scaler.pkl")
+# Feature names
+features = ["Cement", "Sand", "Coarse Aggregate", "Water", "Superplasticizer", "Fly Ash", "Slag", "Age"]
 
-# ------------------- Prediction & Logging ----------------------
-def prepare_features(df):
-    df["Water/Cement"] = df["Water"] / (df["Cement"] + 1e-6)
-    df["Binder"] = df["Cement"] + df["Slag"] + df["FlyAsh"]
-    df["Fine/Coarse"] = df["FineAggregate"] / (df["CoarseAggregate"] + 1e-6)
-    return df
-
-def predict_strength(cement, slag, flyash, water, superplasticizer, coarse, fine, age):
-    df = pd.DataFrame([[cement, slag, flyash, water, superplasticizer, coarse, fine, age]],
-                      columns=["Cement", "Slag", "FlyAsh", "Water", "Superplasticizer",
-                               "CoarseAggregate", "FineAggregate", "Age"])
-    df = prepare_features(df)
-    X = scaler.transform(df)
+def predict_strength(email, cement, sand, agg, water, sp, flyash, slag, age):
+    inputs = [cement, sand, agg, water, sp, flyash, slag, age]
+    X = scaler.transform([inputs])
     prediction = model.predict(X)[0]
-    lower, upper = prediction - 1, prediction + 1
+    prediction = round(prediction, 2)
 
-    suggestion = "🧪 Suggestion: Increase binder or age for more strength." if prediction < 25 else "✅ Suggestion: Strong mix. Consider cost efficiency."
+    # Contribution chart (dummy logic for now – replace with SHAP or similar)
+    total = sum(inputs)
+    contribs = [round((x / total) * prediction, 2) for x in inputs]
 
-    # Log prediction
-    df["Predicted Strength"] = prediction
-    df["Datetime"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    if os.path.exists(LOG_FILE):
-        logs = pd.read_excel(LOG_FILE)
-        logs = pd.concat([logs, df], ignore_index=True)
+    # Save to Excel log
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_row = [timestamp, email, *inputs, prediction]
+
+    if os.path.exists(log_file):
+        df = pd.read_excel(log_file)
+        df.loc[len(df)] = new_row
     else:
-        logs = df
-    logs.to_excel(LOG_FILE, index=False)
+        df = pd.DataFrame([new_row], columns=[
+            "Timestamp", "User Email", *features, "Predicted Strength (MPa)"
+        ])
+    df.to_excel(log_file, index=False)
 
-    return f"✅ Predicted Strength: {prediction:.2f} MPa\n📉 Confidence Interval: {lower:.2f} - {upper:.2f} MPa\n{suggestion}"
+    # Graph 1: Contribution bar chart
+    plt.figure(figsize=(8, 4))
+    plt.bar(features, contribs, color="skyblue")
+    plt.xticks(rotation=45)
+    plt.ylabel("Strength Contribution (MPa)")
+    plt.title("Constituent-wise Strength Contribution")
+    contrib_chart = f"contrib_{uuid.uuid4()}.png"
+    plt.tight_layout()
+    plt.savefig(contrib_chart)
+    plt.close()
 
-def manual_histogram(cement, slag, flyash, water, superplasticizer, coarse, fine, age):
-    df = pd.DataFrame([[cement, slag, flyash, water, superplasticizer, coarse, fine, age]],
-                      columns=["Cement", "Slag", "FlyAsh", "Water", "Superplasticizer",
-                               "CoarseAggregate", "FineAggregate", "Age"])
-    df = prepare_features(df)
-    df = df.T.reset_index()
-    df.columns = ["Factor", "Value"]
-    fig, ax = plt.subplots(figsize=(7, 4))
-    sns.barplot(data=df, x="Value", y="Factor", palette="crest", ax=ax)
-    ax.set_title("Effect of Factors on Concrete Mix (Input Levels)")
-    return fig
+    # Graph 2: Pie chart of percent contributions
+    percentages = [round(x / prediction * 100, 2) for x in contribs]
+    plt.figure(figsize=(6, 6))
+    plt.pie(percentages, labels=features, autopct="%1.1f%%")
+    plt.title("Constituent Contribution (%)")
+    pie_chart = f"pie_{uuid.uuid4()}.png"
+    plt.savefig(pie_chart)
+    plt.close()
 
-def batch_predict(file):
-    df = pd.read_excel(file.name) if file.name.endswith("xlsx") else pd.read_csv(file.name)
-    df.columns = df.columns.str.strip().str.title().str.replace(" ", "")
-    df.rename(columns={"Flyash": "FlyAsh", "Coarseaggregate": "CoarseAggregate", "Fineaggregate": "FineAggregate"}, inplace=True)
-    df = prepare_features(df)
-    features = ["Cement", "Slag", "FlyAsh", "Water", "Superplasticizer",
-                "CoarseAggregate", "FineAggregate", "Age",
-                "Water/Cement", "Binder", "Fine/Coarse"]
-    X = scaler.transform(df[features])
-    preds = model.predict(X)
-    df["Predicted Strength"] = preds
-    df["Lower"] = preds - 1
-    df["Upper"] = preds + 1
-    df["Suggestion"] = ["🧪 Consider increasing binder or curing age." if val < 25 else "✅ Strong mix." for val in preds]
-    df["Datetime"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # PDF Report
+    pdf_path = f"report_{uuid.uuid4()}.pdf"
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Concrete Strength Prediction Report", ln=True, align="C")
 
-    if os.path.exists(LOG_FILE):
-        log_df = pd.read_excel(LOG_FILE)
-        log_df = pd.concat([log_df, df], ignore_index=True)
-    else:
-        log_df = df
-    log_df.to_excel(LOG_FILE, index=False)
+    pdf.set_font("Arial", "", 12)
+    pdf.ln(10)
+    pdf.cell(0, 10, f"Email: {email}", ln=True)
+    pdf.cell(0, 10, f"Predicted Strength: {prediction} MPa", ln=True)
 
-    return df
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Inputs:", ln=True)
+    pdf.set_font("Arial", "", 12)
+    for f, v in zip(features, inputs):
+        pdf.cell(0, 10, f"{f}: {v}", ln=True)
 
-def plot_strength_distribution():
-    if not os.path.exists(LOG_FILE): return None
-    df = pd.read_excel(LOG_FILE)
-    fig, ax = plt.subplots(figsize=(6, 4))
-    sns.histplot(df["Predicted Strength"], bins=20, kde=True, ax=ax)
-    ax.set_title("Distribution of Predicted Strength")
-    return fig
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 12)
+    pdf.cell(0, 10, "Suggestions & Analysis:", ln=True)
+    pdf.set_font("Arial", "", 11)
+    reasons = [
+        "Cement and water ratio majorly affect strength",
+        "Too much sand may reduce durability",
+        "Proper curing (Age) helps gain strength",
+        "Supplementary materials like Fly Ash and Slag improve later-age strength"
+    ]
+    for r in reasons:
+        pdf.multi_cell(0, 10, f"- {r}")
 
-def load_all_logs():
-    if os.path.exists(LOG_FILE):
-        return pd.read_excel(LOG_FILE)
-    return pd.DataFrame()
+    # Add contribution chart
+    pdf.image(contrib_chart, x=10, y=None, w=180)
+    os.remove(contrib_chart)
+    os.remove(pie_chart)
+    pdf.output(pdf_path)
 
-# ------------------- Gradio App ----------------------
-with gr.Blocks(title="🏗️ AI Concrete Compressive Strength Finder") as app:
-    gr.Markdown("# 🏗️ AI Concrete Compressive Strength Finder")
+    return prediction, pie_chart, pdf_path
 
-    with gr.Tab("📊 Predict (Manual)"):
-        with gr.Row():
-            with gr.Column():
-                cement = gr.Number(label="Cement")
-                slag = gr.Number(label="Slag")
-                flyash = gr.Number(label="Fly Ash")
-                water = gr.Number(label="Water")
-                superp = gr.Number(label="Superplasticizer")
-                coarse = gr.Number(label="Coarse Agg")
-                fine = gr.Number(label="Fine Agg")
-                age = gr.Number(label="Age")
-                predict_btn = gr.Button("Predict")
-            result = gr.Textbox(label="Prediction Result")
-        histogram = gr.Plot(label="Component Effects")
+def view_logs(email):
+    if not os.path.exists(log_file):
+        return pd.DataFrame()
 
-    with gr.Tab("📁 Upload Mixes"):
-        file_input = gr.File(label="Upload Excel File")
-        batch_btn = gr.Button("Predict Batch")
-        batch_output = gr.Dataframe()
-        graph_output = gr.Plot(label="Strength Distribution")
+    df = pd.read_excel(log_file)
+    if email == "arslanhafeezkhan.16@gmail.com":
+        return df
+    return df[df["User Email"] == email]
 
-    with gr.Tab("📈 Logs"):
-        full_logs = gr.Dataframe()
+# Gradio UI
+with gr.Blocks() as demo:
+    gr.Markdown("# 🧠 AI Concrete Strength Predictor")
 
-    with gr.Tab("🎨 Interface Settings"):
-        theme = gr.Radio(["Default", "Compact", "Dark"], label="UI Theme")
-        gr.Markdown("Select your preferred interface theme. (Visual only, demo purpose)")
+    with gr.Row():
+        email = gr.Textbox(label="Email", placeholder="Enter your email to log results")
 
-    with gr.Tab("📘 README"):
-        gr.Markdown("""## 🧠 AI Concrete Compressive Strength Finder
-This AI app predicts the compressive strength of concrete based on mix proportions.
-- Manual & Excel input
-- Suggestions for improvement
-- Batch logging
-- Visual analytics""")
+    with gr.Row():
+        cement = gr.Number(label="Cement (kg/m³)")
+        sand = gr.Number(label="Sand (kg/m³)")
+        agg = gr.Number(label="Coarse Aggregate (kg/m³)")
+        water = gr.Number(label="Water (kg/m³)")
 
-    with gr.Tab("💌 Support"):
-        gr.Markdown("""📧 Contact: **arslanhafeezkhan.16@gmail.com**
-We value your feedback and will respond to all inquiries promptly!""")
+    with gr.Row():
+        sp = gr.Number(label="Superplasticizer (kg/m³)")
+        flyash = gr.Number(label="Fly Ash (kg/m³)")
+        slag = gr.Number(label="Slag (kg/m³)")
+        age = gr.Number(label="Age (days)")
 
-    with gr.Tab("📄 License"):
-        gr.Markdown("""All Rights Reserved © 2025 Arslan Khan\nUse permitted for academic and personal research only.""")
+    predict_btn = gr.Button("Predict Strength")
+    output_strength = gr.Textbox(label="Predicted Strength (MPa)")
+    output_chart = gr.Image(label="Constituent % Contribution")
+    output_pdf = gr.File(label="Download PDF Report")
 
-    # Link buttons
-    predict_btn.click(fn=predict_strength,
-                     inputs=[cement, slag, flyash, water, superp, coarse, fine, age],
-                     outputs=result)
+    predict_btn.click(
+        fn=predict_strength,
+        inputs=[email, cement, sand, agg, water, sp, flyash, slag, age],
+        outputs=[output_strength, output_chart, output_pdf]
+    )
 
-    predict_btn.click(fn=manual_histogram,
-                     inputs=[cement, slag, flyash, water, superp, coarse, fine, age],
-                     outputs=histogram)
+    gr.Markdown("## 📜 View Your Prediction History")
+    view_btn = gr.Button("Show My Logs")
+    log_table = gr.Dataframe(label="Your Logs", interactive=False)
+    view_btn.click(fn=view_logs, inputs=[email], outputs=log_table)
 
-    batch_btn.click(fn=batch_predict, inputs=file_input, outputs=batch_output)
-    batch_btn.click(fn=plot_strength_distribution, outputs=graph_output)
-    batch_btn.click(fn=load_all_logs, outputs=full_logs)
-
-app.launch()
+demo.launch()
