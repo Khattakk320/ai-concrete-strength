@@ -1,155 +1,175 @@
 import gradio as gr
-import pandas as pd
-import numpy as np
-import joblib
-import shap
-import matplotlib.pyplot as plt
-import openpyxl
-from datetime import datetime
-from fpdf import FPDF
+import json
 import os
+import pickle
+from fpdf import FPDF
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import GradientBoostingRegressor
+from datetime import datetime
+import pandas as pd
+import matplotlib.pyplot as plt
 
 # Load model and scaler
-model = joblib.load("model.pkl")
-scaler = joblib.load("scaler.pkl")
+with open("model.pkl", "rb") as f:
+    model = pickle.load(f)
 
-# Email of developer
-DEVELOPER_EMAIL = "arslanhafeezkhan.16@gmail.com"
+with open("scaler.pkl", "rb") as f:
+    scaler = pickle.load(f)
+
+# Load or initialize user credentials
+USER_FILE = "users.json"
 LOG_FILE = "user_logs.xlsx"
 
-# Prediction function
-def predict_strength(inputs):
-    X = scaler.transform([inputs])
-    preds = model.predict(X)
-    return np.round(np.mean(preds), 2), preds
+if not os.path.exists(USER_FILE):
+    with open(USER_FILE, "w") as f:
+        json.dump({}, f)
 
-# Save user log
-def save_log(email, inputs, strength):
-    df = pd.DataFrame([[datetime.now(), email] + inputs + [strength]])
-    df.to_excel(LOG_FILE, mode='a', header=False, index=False)
+if not os.path.exists(LOG_FILE):
+    df = pd.DataFrame(columns=["Email", "Inputs", "Prediction", "Timestamp"])
+    df.to_excel(LOG_FILE, index=False)
 
-# View history
-def view_history(email):
-    if not os.path.exists(LOG_FILE):
-        return "No logs yet."
+# Basic CAPTCHA generator
+import random
+def generate_captcha():
+    return str(random.randint(1000, 9999))
+
+active_sessions = {}
+
+def signup(email, password, captcha_input, actual_captcha, remember_me):
+    with open(USER_FILE, "r") as f:
+        users = json.load(f)
+    if email in users:
+        return "❌ Email already registered", None
+    if captcha_input != actual_captcha:
+        return "❌ CAPTCHA incorrect", None
+    users[email] = password
+    with open(USER_FILE, "w") as f:
+        json.dump(users, f)
+    active_sessions[email] = remember_me
+    return "✅ Signup successful", email
+
+def login(email, password, captcha_input, actual_captcha, remember_me):
+    with open(USER_FILE, "r") as f:
+        users = json.load(f)
+    if users.get(email) != password:
+        return "❌ Invalid credentials", None
+    if captcha_input != actual_captcha:
+        return "❌ CAPTCHA incorrect", None
+    active_sessions[email] = remember_me
+    return "✅ Login successful", email
+
+def predict_strength(email, cement, sand, agg, water, superp, flyash, slag, age):
+    inputs = [[cement, sand, agg, water, superp, flyash, slag, age]]
+    scaled_inputs = scaler.transform(inputs)
+    prediction = model.predict(scaled_inputs)[0]
+    result = round(prediction, 2)
+
+    log_entry = {
+        "Email": email,
+        "Inputs": str(inputs),
+        "Prediction": result,
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
     df = pd.read_excel(LOG_FILE)
-    if email != DEVELOPER_EMAIL:
-        df = df[df['User Email'] == email]
-    return df.tail(10)
+    df = df.append(log_entry, ignore_index=True)
+    df.to_excel(LOG_FILE, index=False)
 
-# Generate SHAP summary plot
-def explain_prediction(inputs):
-    explainer = shap.Explainer(model, masker=scaler.transform)
-    shap_values = explainer([inputs])
-    fig, ax = plt.subplots()
-    shap.plots.bar(shap_values[0], show=False)
-    plt.title("SHAP Feature Importance")
-    fig.savefig("shap_plot.png")
-    plt.close(fig)
-    return "shap_plot.png"
+    return f"Predicted Strength: {result} MPa"
 
-# Generate constituent strength pie chart
-def constituent_chart(inputs):
-    weights = np.array(inputs) / np.sum(inputs)
-    labels = ['Cement', 'Sand', 'Coarse Agg.', 'Water', 'Superpl.', 'Fly Ash', 'Slag', 'Age']
-    fig, ax = plt.subplots()
-    ax.pie(weights, labels=labels, autopct='%1.1f%%')
-    plt.title("Strength Contribution (%)")
-    fig.savefig("pie_chart.png")
-    plt.close(fig)
-    return "pie_chart.png"
+def upload_excel(email, file):
+    df = pd.read_excel(file.name)
+    predictions = []
+    for _, row in df.iterrows():
+        input_data = row.values.tolist()
+        scaled = scaler.transform([input_data])
+        pred = model.predict(scaled)[0]
+        predictions.append(round(pred, 2))
+    df["Predicted Strength"] = predictions
+    return df
 
-# Generate PDF Report
-def generate_pdf(email, inputs, strength, methods, reason_img, contrib_img):
+def generate_pdf_report(email):
+    df = pd.read_excel(LOG_FILE)
+    user_df = df[df["Email"] == email]
+
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
 
-    pdf.cell(200, 10, txt="AI Concrete Strength Prediction Report", ln=1, align="C")
-    pdf.cell(200, 10, txt=f"User: {email}", ln=1)
+    pdf.cell(200, 10, txt="Concrete Strength Prediction Report", ln=True, align='C')
+    pdf.ln(10)
+    for index, row in user_df.iterrows():
+        line = f"{row['Timestamp']}: {row['Inputs']} → {row['Prediction']} MPa"
+        pdf.multi_cell(0, 10, line)
+    report_name = f"{email}_report.pdf"
+    pdf.output(report_name)
+    return report_name
 
-    labels = ['Cement', 'Sand', 'Coarse Agg.', 'Water', 'Superpl.', 'Fly Ash', 'Slag', 'Age']
-    for i, val in enumerate(inputs):
-        pdf.cell(200, 10, txt=f"{labels[i]}: {val}", ln=1)
+def plot_results(email):
+    df = pd.read_excel(LOG_FILE)
+    df = df[df["Email"] == email]
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+    df = df.sort_values("Timestamp")
 
-    pdf.cell(200, 10, txt=f"\nFinal Predicted Strength: {strength} MPa", ln=1)
-    pdf.cell(200, 10, txt=f"Method-wise Predictions: {', '.join([str(round(p,2)) for p in methods])}", ln=1)
-
-    pdf.cell(200, 10, txt="\nReasoning based on input influence:", ln=1)
-    pdf.image(reason_img, x=10, y=None, w=180)
-
-    pdf.cell(200, 10, txt="\nConstituent Contribution Chart:", ln=1)
-    pdf.image(contrib_img, x=10, y=None, w=180)
-
-    pdf.cell(200, 10, txt="\nSuggestions:", ln=1)
-    pdf.multi_cell(0, 10, txt=(
-        "- Cement and Superplasticizer improve strength.\n"
-        "- Fly Ash and Slag help long-term durability.\n"
-        "- Control water for better performance.\n"
-        "- Higher curing age generally leads to better strength."
-    ))
-
-    pdf.output("report.pdf")
-    return "report.pdf"
-
-# Upload Excel
-def handle_excel(file, email):
-    df = pd.read_excel(file)
-    required_cols = ['Cement', 'Sand', 'Coarse Aggregate', 'Water', 'Superplasticizer',
-                     'Fly Ash', 'Slag', 'Age']
-    if not all(col in df.columns for col in required_cols):
-        return "Invalid Excel format"
-    inputs = df[required_cols].values
-    results = []
-    for row in inputs:
-        strength, _ = predict_strength(list(row))
-        save_log(email, list(row), strength)
-        results.append(strength)
-    df['Predicted Strength (MPa)'] = results
-    df.to_excel("bulk_results.xlsx", index=False)
-    return "bulk_results.xlsx"
-
-# Main interface
-def main(email, cement, sand, agg, water, superp, flyash, slag, age):
-    inputs = [cement, sand, agg, water, superp, flyash, slag, age]
-    strength, methods = predict_strength(inputs)
-    save_log(email, inputs, strength)
-    reason_img = explain_prediction(inputs)
-    contrib_img = constituent_chart(inputs)
-    pdf_path = generate_pdf(email, inputs, strength, methods, reason_img, contrib_img)
-    return strength, reason_img, contrib_img, pdf_path
+    plt.figure(figsize=(6, 3))
+    plt.plot(df["Timestamp"], df["Prediction"], marker='o')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.title("Predicted Strength Over Time")
+    plt.xlabel("Timestamp")
+    plt.ylabel("MPa")
+    plot_file = f"{email}_plot.png"
+    plt.savefig(plot_file)
+    return plot_file
 
 # Gradio UI
-with gr.Blocks(title="AI Concrete Strength Predictor") as app:
-    with gr.Tab("Predict"):
-        email = gr.Textbox(label="Email")
-        cement = gr.Number(label="Cement (kg)")
-        sand = gr.Number(label="Sand (kg)")
-        agg = gr.Number(label="Coarse Aggregate (kg)")
-        water = gr.Number(label="Water (kg)")
-        superp = gr.Number(label="Superplasticizer (kg)")
-        flyash = gr.Number(label="Fly Ash (kg)")
-        slag = gr.Number(label="Slag (kg)")
-        age = gr.Number(label="Age (days)")
-        btn = gr.Button("Predict Strength")
-        result = gr.Number(label="Predicted Strength (MPa)")
-        shap_img = gr.Image()
-        pie_img = gr.Image()
-        pdf_out = gr.File(label="Download PDF Report")
-        btn.click(main, inputs=[email, cement, sand, agg, water, superp, flyash, slag, age],
-                  outputs=[result, shap_img, pie_img, pdf_out])
 
-    with gr.Tab("History"):
-        email2 = gr.Textbox(label="Enter Email to View History")
-        btn2 = gr.Button("Show History")
-        out_table = gr.Dataframe()
-        btn2.click(view_history, inputs=[email2], outputs=out_table)
+with gr.Blocks() as app:
+    with gr.Tabs():
+        with gr.Tab("Login / Signup"):
+            with gr.Row():
+                email = gr.Textbox(label="Email")
+                password = gr.Textbox(label="Password", type="password")
+            with gr.Row():
+                captcha = gr.Textbox(label="Enter CAPTCHA")
+                captcha_display = gr.Textbox(value=generate_captcha(), label="CAPTCHA", interactive=False)
+                remember_me = gr.Checkbox(label="Remember Me")
+            login_btn = gr.Button("Login")
+            signup_btn = gr.Button("Sign Up")
+            status = gr.Textbox(label="Status")
+            current_user = gr.State("")
 
-    with gr.Tab("Bulk Upload"):
-        email3 = gr.Textbox(label="Email")
-        file = gr.File(label="Upload Excel File", file_types=[".xlsx"])
-        btn3 = gr.Button("Submit File")
-        output_file = gr.File(label="Download Results")
-        btn3.click(handle_excel, inputs=[file, email3], outputs=output_file)
+            login_btn.click(login, [email, password, captcha, captcha_display, remember_me], [status, current_user])
+            signup_btn.click(signup, [email, password, captcha, captcha_display, remember_me], [status, current_user])
+
+        with gr.Tab("Predict"):
+            with gr.Column():
+                cement = gr.Number(label="Cement")
+                sand = gr.Number(label="Sand")
+                agg = gr.Number(label="Coarse Aggregate")
+                water = gr.Number(label="Water")
+                superp = gr.Number(label="Superplasticizer")
+                flyash = gr.Number(label="Fly Ash")
+                slag = gr.Number(label="Slag")
+                age = gr.Number(label="Age (days)")
+                predict_btn = gr.Button("Predict")
+                result = gr.Textbox(label="Result")
+
+                predict_btn.click(predict_strength, [current_user, cement, sand, agg, water, superp, flyash, slag, age], result)
+
+        with gr.Tab("Excel Upload"):
+            file_input = gr.File(label="Upload Excel File")
+            table_output = gr.Dataframe()
+            upload_btn = gr.Button("Upload & Predict")
+            upload_btn.click(upload_excel, [current_user, file_input], table_output)
+
+        with gr.Tab("Report & Plot"):
+            report_btn = gr.Button("Download PDF Report")
+            plot_btn = gr.Button("Show Strength Plot")
+            pdf_output = gr.File()
+            plot_output = gr.Image()
+            report_btn.click(generate_pdf_report, current_user, pdf_output)
+            plot_btn.click(plot_results, current_user, plot_output)
 
 app.launch()
