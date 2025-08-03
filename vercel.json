@@ -1,14 +1,13 @@
 {
-  "builds": [
-    {
-      "src": "app.py",
-      "use": "@vercel/python"
+  "functions": {
+    "api/*.py": {
+      "maxDuration": 10,
+      "memory": 1024
     }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "app.py"
+  },
+  "build": {
+    "env": {
+      "GRADIO_ANALYTICS_ENABLED": "False"
     }
-  ]
+  }
 }
