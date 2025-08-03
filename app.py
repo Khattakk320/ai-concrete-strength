@@ -2,145 +2,154 @@ import gradio as gr
 import pandas as pd
 import numpy as np
 import joblib
+import shap
 import matplotlib.pyplot as plt
+import openpyxl
 from datetime import datetime
-import os
 from fpdf import FPDF
-import uuid
+import os
 
 # Load model and scaler
 model = joblib.load("model.pkl")
 scaler = joblib.load("scaler.pkl")
-log_file = "user_logs.xlsx"
 
-# Feature names
-features = ["Cement", "Sand", "Coarse Aggregate", "Water", "Superplasticizer", "Fly Ash", "Slag", "Age"]
+# Email of developer
+DEVELOPER_EMAIL = "arslanhafeezkhan.16@gmail.com"
+LOG_FILE = "user_logs.xlsx"
 
-def predict_strength(email, cement, sand, agg, water, sp, flyash, slag, age):
-    inputs = [cement, sand, agg, water, sp, flyash, slag, age]
+# Prediction function
+def predict_strength(inputs):
     X = scaler.transform([inputs])
-    prediction = model.predict(X)[0]
-    prediction = round(prediction, 2)
+    preds = model.predict(X)
+    return np.round(np.mean(preds), 2), preds
 
-    # Contribution chart (dummy logic for now – replace with SHAP or similar)
-    total = sum(inputs)
-    contribs = [round((x / total) * prediction, 2) for x in inputs]
+# Save user log
+def save_log(email, inputs, strength):
+    df = pd.DataFrame([[datetime.now(), email] + inputs + [strength]])
+    df.to_excel(LOG_FILE, mode='a', header=False, index=False)
 
-    # Save to Excel log
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_row = [timestamp, email, *inputs, prediction]
+# View history
+def view_history(email):
+    if not os.path.exists(LOG_FILE):
+        return "No logs yet."
+    df = pd.read_excel(LOG_FILE)
+    if email != DEVELOPER_EMAIL:
+        df = df[df['User Email'] == email]
+    return df.tail(10)
 
-    if os.path.exists(log_file):
-        df = pd.read_excel(log_file)
-        df.loc[len(df)] = new_row
-    else:
-        df = pd.DataFrame([new_row], columns=[
-            "Timestamp", "User Email", *features, "Predicted Strength (MPa)"
-        ])
-    df.to_excel(log_file, index=False)
+# Generate SHAP summary plot
+def explain_prediction(inputs):
+    explainer = shap.Explainer(model, masker=scaler.transform)
+    shap_values = explainer([inputs])
+    fig, ax = plt.subplots()
+    shap.plots.bar(shap_values[0], show=False)
+    plt.title("SHAP Feature Importance")
+    fig.savefig("shap_plot.png")
+    plt.close(fig)
+    return "shap_plot.png"
 
-    # Graph 1: Contribution bar chart
-    plt.figure(figsize=(8, 4))
-    plt.bar(features, contribs, color="skyblue")
-    plt.xticks(rotation=45)
-    plt.ylabel("Strength Contribution (MPa)")
-    plt.title("Constituent-wise Strength Contribution")
-    contrib_chart = f"contrib_{uuid.uuid4()}.png"
-    plt.tight_layout()
-    plt.savefig(contrib_chart)
-    plt.close()
+# Generate constituent strength pie chart
+def constituent_chart(inputs):
+    weights = np.array(inputs) / np.sum(inputs)
+    labels = ['Cement', 'Sand', 'Coarse Agg.', 'Water', 'Superpl.', 'Fly Ash', 'Slag', 'Age']
+    fig, ax = plt.subplots()
+    ax.pie(weights, labels=labels, autopct='%1.1f%%')
+    plt.title("Strength Contribution (%)")
+    fig.savefig("pie_chart.png")
+    plt.close(fig)
+    return "pie_chart.png"
 
-    # Graph 2: Pie chart of percent contributions
-    percentages = [round(x / prediction * 100, 2) for x in contribs]
-    plt.figure(figsize=(6, 6))
-    plt.pie(percentages, labels=features, autopct="%1.1f%%")
-    plt.title("Constituent Contribution (%)")
-    pie_chart = f"pie_{uuid.uuid4()}.png"
-    plt.savefig(pie_chart)
-    plt.close()
-
-    # PDF Report
-    pdf_path = f"report_{uuid.uuid4()}.pdf"
+# Generate PDF Report
+def generate_pdf(email, inputs, strength, methods, reason_img, contrib_img):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Concrete Strength Prediction Report", ln=True, align="C")
+    pdf.set_font("Arial", size=12)
 
-    pdf.set_font("Arial", "", 12)
-    pdf.ln(10)
-    pdf.cell(0, 10, f"Email: {email}", ln=True)
-    pdf.cell(0, 10, f"Predicted Strength: {prediction} MPa", ln=True)
+    pdf.cell(200, 10, txt="AI Concrete Strength Prediction Report", ln=1, align="C")
+    pdf.cell(200, 10, txt=f"User: {email}", ln=1)
 
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Inputs:", ln=True)
-    pdf.set_font("Arial", "", 12)
-    for f, v in zip(features, inputs):
-        pdf.cell(0, 10, f"{f}: {v}", ln=True)
+    labels = ['Cement', 'Sand', 'Coarse Agg.', 'Water', 'Superpl.', 'Fly Ash', 'Slag', 'Age']
+    for i, val in enumerate(inputs):
+        pdf.cell(200, 10, txt=f"{labels[i]}: {val}", ln=1)
 
-    pdf.ln(5)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Suggestions & Analysis:", ln=True)
-    pdf.set_font("Arial", "", 11)
-    reasons = [
-        "Cement and water ratio majorly affect strength",
-        "Too much sand may reduce durability",
-        "Proper curing (Age) helps gain strength",
-        "Supplementary materials like Fly Ash and Slag improve later-age strength"
-    ]
-    for r in reasons:
-        pdf.multi_cell(0, 10, f"- {r}")
+    pdf.cell(200, 10, txt=f"\nFinal Predicted Strength: {strength} MPa", ln=1)
+    pdf.cell(200, 10, txt=f"Method-wise Predictions: {', '.join([str(round(p,2)) for p in methods])}", ln=1)
 
-    # Add contribution chart
-    pdf.image(contrib_chart, x=10, y=None, w=180)
-    os.remove(contrib_chart)
-    os.remove(pie_chart)
-    pdf.output(pdf_path)
+    pdf.cell(200, 10, txt="\nReasoning based on input influence:", ln=1)
+    pdf.image(reason_img, x=10, y=None, w=180)
 
-    return prediction, pie_chart, pdf_path
+    pdf.cell(200, 10, txt="\nConstituent Contribution Chart:", ln=1)
+    pdf.image(contrib_img, x=10, y=None, w=180)
 
-def view_logs(email):
-    if not os.path.exists(log_file):
-        return pd.DataFrame()
+    pdf.cell(200, 10, txt="\nSuggestions:", ln=1)
+    pdf.multi_cell(0, 10, txt=(
+        "- Cement and Superplasticizer improve strength.\n"
+        "- Fly Ash and Slag help long-term durability.\n"
+        "- Control water for better performance.\n"
+        "- Higher curing age generally leads to better strength."
+    ))
 
-    df = pd.read_excel(log_file)
-    if email == "arslanhafeezkhan.16@gmail.com":
-        return df
-    return df[df["User Email"] == email]
+    pdf.output("report.pdf")
+    return "report.pdf"
+
+# Upload Excel
+def handle_excel(file, email):
+    df = pd.read_excel(file)
+    required_cols = ['Cement', 'Sand', 'Coarse Aggregate', 'Water', 'Superplasticizer',
+                     'Fly Ash', 'Slag', 'Age']
+    if not all(col in df.columns for col in required_cols):
+        return "Invalid Excel format"
+    inputs = df[required_cols].values
+    results = []
+    for row in inputs:
+        strength, _ = predict_strength(list(row))
+        save_log(email, list(row), strength)
+        results.append(strength)
+    df['Predicted Strength (MPa)'] = results
+    df.to_excel("bulk_results.xlsx", index=False)
+    return "bulk_results.xlsx"
+
+# Main interface
+def main(email, cement, sand, agg, water, superp, flyash, slag, age):
+    inputs = [cement, sand, agg, water, superp, flyash, slag, age]
+    strength, methods = predict_strength(inputs)
+    save_log(email, inputs, strength)
+    reason_img = explain_prediction(inputs)
+    contrib_img = constituent_chart(inputs)
+    pdf_path = generate_pdf(email, inputs, strength, methods, reason_img, contrib_img)
+    return strength, reason_img, contrib_img, pdf_path
 
 # Gradio UI
-with gr.Blocks() as demo:
-    gr.Markdown("# 🧠 AI Concrete Strength Predictor")
-
-    with gr.Row():
-        email = gr.Textbox(label="Email", placeholder="Enter your email to log results")
-
-    with gr.Row():
-        cement = gr.Number(label="Cement (kg/m³)")
-        sand = gr.Number(label="Sand (kg/m³)")
-        agg = gr.Number(label="Coarse Aggregate (kg/m³)")
-        water = gr.Number(label="Water (kg/m³)")
-
-    with gr.Row():
-        sp = gr.Number(label="Superplasticizer (kg/m³)")
-        flyash = gr.Number(label="Fly Ash (kg/m³)")
-        slag = gr.Number(label="Slag (kg/m³)")
+with gr.Blocks(title="AI Concrete Strength Predictor") as app:
+    with gr.Tab("Predict"):
+        email = gr.Textbox(label="Email")
+        cement = gr.Number(label="Cement (kg)")
+        sand = gr.Number(label="Sand (kg)")
+        agg = gr.Number(label="Coarse Aggregate (kg)")
+        water = gr.Number(label="Water (kg)")
+        superp = gr.Number(label="Superplasticizer (kg)")
+        flyash = gr.Number(label="Fly Ash (kg)")
+        slag = gr.Number(label="Slag (kg)")
         age = gr.Number(label="Age (days)")
+        btn = gr.Button("Predict Strength")
+        result = gr.Number(label="Predicted Strength (MPa)")
+        shap_img = gr.Image()
+        pie_img = gr.Image()
+        pdf_out = gr.File(label="Download PDF Report")
+        btn.click(main, inputs=[email, cement, sand, agg, water, superp, flyash, slag, age],
+                  outputs=[result, shap_img, pie_img, pdf_out])
 
-    predict_btn = gr.Button("Predict Strength")
-    output_strength = gr.Textbox(label="Predicted Strength (MPa)")
-    output_chart = gr.Image(label="Constituent % Contribution")
-    output_pdf = gr.File(label="Download PDF Report")
+    with gr.Tab("History"):
+        email2 = gr.Textbox(label="Enter Email to View History")
+        btn2 = gr.Button("Show History")
+        out_table = gr.Dataframe()
+        btn2.click(view_history, inputs=[email2], outputs=out_table)
 
-    predict_btn.click(
-        fn=predict_strength,
-        inputs=[email, cement, sand, agg, water, sp, flyash, slag, age],
-        outputs=[output_strength, output_chart, output_pdf]
-    )
+    with gr.Tab("Bulk Upload"):
+        email3 = gr.Textbox(label="Email")
+        file = gr.File(label="Upload Excel File", file_types=[".xlsx"])
+        btn3 = gr.Button("Submit File")
+        output_file = gr.File(label="Download Results")
+        btn3.click(handle_excel, inputs=[file, email3], outputs=output_file)
 
-    gr.Markdown("## 📜 View Your Prediction History")
-    view_btn = gr.Button("Show My Logs")
-    log_table = gr.Dataframe(label="Your Logs", interactive=False)
-    view_btn.click(fn=view_logs, inputs=[email], outputs=log_table)
-
-demo.launch()
+app.launch()
