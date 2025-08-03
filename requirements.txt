@@ -1,8 +1,9 @@
 gradio
 pandas
 numpy
-matplotlib
 joblib
+shap
+matplotlib
 openpyxl
 fpdf
 scikit-learn
