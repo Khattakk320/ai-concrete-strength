@@ -1,6 +1,8 @@
 gradio==4.25.0
-scikit-learn
 pandas
-openpyxl
-fpdf
+scikit-learn
 matplotlib
+shap
+fpdf
+openpyxl
+joblib
