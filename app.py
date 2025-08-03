@@ -1,40 +1,21 @@
-""import gradio as gr
+import gradio as gr
 import pandas as pd
 import joblib
 import numpy as np
-import shap
-import matplotlib.pyplot as plt
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
+import plotly.graph_objects as go
 from fpdf import FPDF
 import os
 from datetime import datetime
 import openpyxl
 
 # Load model and scaler
-model = joblib.load("model.pkl")
-scaler = joblib.load("scaler.pkl")
+model = joblib.load("model.pk1")
+scaler = joblib.load("scaler.pk1")
 
-# Email of developer
 DEVELOPER_EMAIL = "arslanhafeezkhan.16@gmail.com"
 LOG_FILE = "user_logs.xlsx"
-
-# Feature columns
 features = ["Cement", "Sand", "Coarse Aggregate", "Water", "Superplasticizer", "Fly Ash", "Slag", "Age"]
 
-# ML Models for ensemble
-rf = RandomForestRegressor(n_estimators=100, random_state=42)
-gb = GradientBoostingRegressor(n_estimators=100, random_state=42)
-lr = LinearRegression()
-
-# Create SHAP explainer
-def get_shap_values(input_df):
-    rf.fit(input_df, model.predict(input_df))
-    explainer = shap.Explainer(rf)
-    shap_values = explainer(input_df)
-    return shap_values
-
-# Save user logs
 def log_prediction(email, input_data, prediction):
     data = input_data.copy()
     data['Email'] = email
@@ -47,24 +28,16 @@ def log_prediction(email, input_data, prediction):
         old_df = pd.read_excel(LOG_FILE)
         pd.concat([old_df, df], ignore_index=True).to_excel(LOG_FILE, index=False)
 
-# View history
-
 def view_history(email):
     if os.path.exists(LOG_FILE):
         df = pd.read_excel(LOG_FILE)
-        if email == DEVELOPER_EMAIL:
-            return df
-        else:
-            return df[df['Email'] == email]
-    else:
-        return pd.DataFrame()
+        return df if email == DEVELOPER_EMAIL else df[df['Email'] == email]
+    return pd.DataFrame()
 
-# Generate PDF report
-def generate_pdf(input_data, prediction, shap_percents, suggestion_text):
+def generate_pdf(input_data, prediction, importances, suggestion_text):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-
     pdf.cell(200, 10, txt="Concrete Strength Prediction Report", ln=True, align="C")
     pdf.ln(10)
 
@@ -75,8 +48,8 @@ def generate_pdf(input_data, prediction, shap_percents, suggestion_text):
     pdf.cell(200, 10, txt=f"Predicted Strength: {prediction:.2f} MPa", ln=True)
     pdf.ln(10)
 
-    pdf.cell(200, 10, txt="Constituent Contribution (%):", ln=True)
-    for name, val in shap_percents.items():
+    pdf.cell(200, 10, txt="Feature Importances (%):", ln=True)
+    for name, val in importances.items():
         pdf.cell(200, 10, txt=f"{name}: {val:.2f}%", ln=True)
 
     pdf.ln(10)
@@ -86,16 +59,13 @@ def generate_pdf(input_data, prediction, shap_percents, suggestion_text):
     pdf.output(file_name)
     return file_name
 
-# Suggestion generator
-def get_suggestions(shap_values):
-    top_features = shap_values.abs.mean(0).argsort()[-3:][::-1]
+def get_suggestions(importances):
+    sorted_features = sorted(importances.items(), key=lambda x: -x[1])
     suggestions = ""
-    for i in top_features:
-        feature = features[i]
-        suggestions += f"- {feature} significantly affects strength. Adjust its proportion carefully.\n"
+    for name, _ in sorted_features[:3]:
+        suggestions += f"- {name} significantly affects strength. Adjust its proportion carefully.\n"
     return suggestions
 
-# Prediction function
 def predict_strength(email, cement, sand, coarse_agg, water, superplasticizer, fly_ash, slag, age):
     inputs = {
         "Cement": cement,
@@ -109,35 +79,27 @@ def predict_strength(email, cement, sand, coarse_agg, water, superplasticizer, f
     }
     df = pd.DataFrame([inputs])
     scaled = scaler.transform(df)
+    prediction = model.predict(scaled)[0]
 
-    pred1 = model.predict(scaled)[0]
-    rf.fit(df, [pred1])
-    gb.fit(df, [pred1])
-    lr.fit(df, [pred1])
-    pred2 = rf.predict(df)[0]
-    pred3 = gb.predict(df)[0]
-    pred4 = lr.predict(df)[0]
-    final_pred = np.mean([pred1, pred2, pred3, pred4])
+    log_prediction(email, inputs, prediction)
 
-    log_prediction(email, inputs, final_pred)
+    try:
+        importances_raw = model.feature_importances_
+        total = np.sum(importances_raw)
+        importances = {features[i]: 100 * importances_raw[i] / total for i in range(len(features))}
+    except:
+        importances = {name: 0 for name in features}
 
-    # SHAP Explanation
-    shap_values = get_shap_values(df)
-    shap_vals = shap_values.values[0]
-    shap_sum = np.sum(np.abs(shap_vals))
-    shap_percents = {features[i]: 100 * abs(shap_vals[i]) / shap_sum for i in range(len(features))}
+    fig = go.Figure(data=[go.Pie(labels=list(importances.keys()), values=list(importances.values()), hole=0.3)])
+    fig.update_layout(title="Feature Contribution")
+    chart_path = "importance_chart.png"
+    fig.write_image(chart_path)
 
-    fig, ax = plt.subplots()
-    plt.pie(shap_percents.values(), labels=shap_percents.keys(), autopct='%1.1f%%')
-    plt.title('Strength Contribution by Constituents')
-    plt.savefig("shap_pie.png")
+    suggestion_text = get_suggestions(importances)
+    report_path = generate_pdf(inputs, prediction, importances, suggestion_text)
 
-    suggestion_text = get_suggestions(shap_values)
-    report_path = generate_pdf(inputs, final_pred, shap_percents, suggestion_text)
+    return prediction, importances, chart_path, report_path
 
-    return final_pred, shap_percents, "shap_pie.png", report_path
-
-# Bulk upload handler
 def bulk_predict(email, file):
     df = pd.read_excel(file.name)
     results = []
@@ -148,20 +110,17 @@ def bulk_predict(email, file):
         results.append(row_result)
     return pd.DataFrame(results)
 
-# Gradio Interface
 with gr.Blocks() as app:
     gr.Markdown("# AI Concrete Strength Predictor")
 
     email = gr.Textbox(label="Your Email")
 
     with gr.Tab("Manual Prediction"):
-        inputs = [
-            gr.Number(label=label) for label in features
-        ]
+        inputs = [gr.Number(label=label) for label in features]
         predict_btn = gr.Button("Predict")
         result = gr.Textbox(label="Predicted Strength (MPa)")
-        shap_txt = gr.JSON(label="Contribution %")
-        shap_img = gr.Image(label="Contribution Pie Chart")
+        import_txt = gr.JSON(label="Contribution %")
+        import_img = gr.Image(label="Feature Chart")
         pdf_out = gr.File(label="Download Report")
 
     with gr.Tab("Bulk Prediction"):
@@ -173,7 +132,7 @@ with gr.Blocks() as app:
         view_btn = gr.Button("View My History")
         history_table = gr.Dataframe()
 
-    predict_btn.click(fn=predict_strength, inputs=[email] + inputs, outputs=[result, shap_txt, shap_img, pdf_out])
+    predict_btn.click(fn=predict_strength, inputs=[email] + inputs, outputs=[result, import_txt, import_img, pdf_out])
     bulk_btn.click(fn=bulk_predict, inputs=[email, file_input], outputs=bulk_out)
     view_btn.click(fn=view_history, inputs=[email], outputs=history_table)
 
