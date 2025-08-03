@@ -1,9 +1,8 @@
-gradio==4.26.0
+gradio
 pandas
 numpy
-xgboost
-scikit-learn
 matplotlib
-seaborn
-openpyxl
 joblib
+openpyxl
+fpdf
+scikit-learn
